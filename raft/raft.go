@@ -104,8 +104,10 @@ func (c *Config) validate() error {
 // Progress represents a follower’s progress in the view of the leader. Leader maintains
 // progresses of all followers, and sends entries to the follower based on its progress.
 type Progress struct {
-	Match, Next uint64
+	Match, Next uint64	// Match 是已匹配的索引，Next 是下一个要发送的索引
 }
+// Progress 表示领导者视角中跟随者的进度。领导者维护所有跟随者的进度，
+// 并根据其进度向跟随者发送条目。
 
 type Raft struct {
 	id uint64
@@ -183,6 +185,7 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	
 }
 
 // becomeFollower transform this peer's state to Follower

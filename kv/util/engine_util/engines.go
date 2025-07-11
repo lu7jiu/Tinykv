@@ -68,10 +68,10 @@ func CreateDB(path string, raft bool) *badger.DB {
 	opts := badger.DefaultOptions
 	if raft {
 		// Do not need to write blob for raft engine because it will be deleted soon.
-		opts.ValueThreshold = 0
+		opts.ValueThreshold = 0		// 禁用值日志存储（所有数据直接存LSM树）
 	}
-	opts.Dir = path
-	opts.ValueDir = opts.Dir
+	opts.Dir = path	// LSM树存储路径
+	opts.ValueDir = opts.Dir	// 值日志与主数据同目录
 	if err := os.MkdirAll(opts.Dir, os.ModePerm); err != nil {
 		log.Fatal(err)
 	}

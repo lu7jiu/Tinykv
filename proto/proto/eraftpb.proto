@@ -16,6 +16,8 @@ enum EntryType {
 // For configuration changes, the data will contain the ConfChange message and the
 // context will provide anything needed to assist the configuration change. The context
 // is for the user to set and use in this case.
+
+//Raft 日志条目
 message Entry {
     EntryType entry_type = 1;
     uint64 term = 2;
@@ -25,13 +27,13 @@ message Entry {
 
 // SnapshotMetadata contains the log index and term of the last log applied to this
 // Snapshot, along with the membership information of the time the last log applied.
-message SnapshotMetadata {
-    ConfState conf_state = 1;
-    uint64 index = 2;
-    uint64 term = 3;
+message SnapshotMetadata {  //快照元数据，包含快照相关的日志信息和集群成员信息
+    ConfState conf_state = 1;   //创建快照时的集群成员状态
+    uint64 index = 2;   //快照包含的最后一个日志条目的索引
+    uint64 term = 3;    //快照包含的最后一个日志条目的任期
 }
 
-message Snapshot {
+message Snapshot {  //快照数据结构
     bytes data = 1;
     SnapshotMetadata metadata = 2;
 }
@@ -90,7 +92,7 @@ message HardState {
 }
 
 // ConfState contains the current membership information of the raft group
-message ConfState {
+message ConfState { //集群配置状态
     // all node id
     repeated uint64 nodes = 1;
 }
@@ -102,8 +104,8 @@ enum ConfChangeType {
 
 // ConfChange is the data that attach on entry with EntryConfChange type
 message ConfChange {
-    ConfChangeType change_type = 1;
+    ConfChangeType change_type = 1; //配置变更类型add/remove
     // node will be add/remove
-    uint64 node_id = 2;
-    bytes context = 3;
+    uint64 node_id = 2; //要添加或移除的节点 ID
+    bytes context = 3;  //配置变更的上下文信息，由用户设置和使用
 }

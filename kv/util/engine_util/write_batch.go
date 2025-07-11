@@ -7,11 +7,11 @@ import (
 )
 
 type WriteBatch struct {
-	entries       []*badger.Entry
-	size          int
-	safePoint     int
-	safePointSize int
-	safePointUndo int
+	entries       []*badger.Entry	// 存储所有待处理的操作
+	size          int	// 当前批次的总数据大小（字节）
+	safePoint     int	// 安全点位置（索引）
+	safePointSize int	// 安全点处的总字节大小
+	safePointUndo int	// 需要回滚的操作计数
 }
 
 const (
@@ -49,7 +49,7 @@ func (wb *WriteBatch) DeleteCF(cf string, key []byte) {
 }
 
 func (wb *WriteBatch) SetMeta(key []byte, msg proto.Message) error {
-	val, err := proto.Marshal(msg)
+	val, err := proto.Marshal(msg)	// 序列化为[]byte
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -76,7 +76,7 @@ func (wb *WriteBatch) WriteToDB(db *badger.DB) error {
 		err := db.Update(func(txn *badger.Txn) error {
 			for _, entry := range wb.entries {
 				var err1 error
-				if len(entry.Value) == 0 {
+				if len(entry.Value) == 0 {	//value不存在表示删除
 					err1 = txn.Delete(entry.Key)
 				} else {
 					err1 = txn.SetEntry(entry)

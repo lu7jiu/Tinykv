@@ -66,7 +66,7 @@ func NewCFIterator(cf string, txn *badger.Txn) *BadgerIterator {
 	}
 }
 
-func (it *BadgerIterator) Item() DBItem {
+func (it *BadgerIterator) Item() DBItem {	//返回当前项
 	return &CFItem{
 		item:      it.iter.Item(),
 		prefixLen: len(it.prefix),

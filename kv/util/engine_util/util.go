@@ -63,7 +63,7 @@ func GetMetaFromTxn(txn *badger.Txn, key []byte, msg proto.Message) error {
 }
 
 func PutMeta(engine *badger.DB, key []byte, msg proto.Message) error {
-	val, err := proto.Marshal(msg)
+	val, err := proto.Marshal(msg)	//序列化
 	if err != nil {
 		return err
 	}

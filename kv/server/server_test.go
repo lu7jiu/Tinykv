@@ -197,7 +197,7 @@ func TestRawDelete1(t *testing.T) {
 	assert.Nil(t, err)
 
 	val, err := Get(s, cf, []byte{99})
-	assert.Equal(t, nil, err)
+	assert.Equal(t, nil, err)	//key不存在时err为nil
 	assert.Equal(t, []byte(nil), val)
 }
 

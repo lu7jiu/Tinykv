@@ -12,7 +12,7 @@ import (
 	"bytes"
 )
 
-// KeyError is a wrapper type so we can implement the `error` interface.
+// // KeyError is a wrapper type so we can implement the `error` interface.
 type KeyError struct {
 	kvrpcpb.KeyError
 }
@@ -264,6 +264,7 @@ func decodeTimestamp(key []byte) uint64 {
 }
 
 // PhysicalTime returns the physical time part of the timestamp.
+
 func PhysicalTime(ts uint64) uint64 {
 	return ts >> tsoutil.PhysicalShiftBits
 }

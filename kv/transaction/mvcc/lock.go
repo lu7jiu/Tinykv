@@ -13,14 +13,14 @@ import (
 const TsMax uint64 = ^uint64(0)
 
 type Lock struct {
-	Primary []byte
-	Ts      uint64
-	Ttl     uint64
-	Kind    WriteKind
+	Primary []byte    // 事务的主键
+	Ts      uint64    // 锁持有者的起始时间戳
+	Ttl     uint64    // 锁的存活时间
+	Kind    WriteKind // 锁类型
 }
 
 type KlPair struct {
-	Key  []byte
+	Key  []byte // 被锁定的键
 	Lock *Lock
 }
 
@@ -42,8 +42,11 @@ func (lock *Lock) ToBytes() []byte {
 	return buf
 }
 
+//序列化格式：
+//[Primary Key][Kind (1 byte)][Ts (8 bytes)][Ttl (8 bytes)]
+
 // ParseLock attempts to parse a byte string into a Lock object.
-func ParseLock(input []byte) (*Lock, error) {
+func ParseLock(input []byte) (*Lock, error) { //按格式解析字节数组，重建 Lock 对象。
 	if len(input) <= 16 {
 		return nil, fmt.Errorf("mvcc: error parsing lock, not enough input, found %d bytes", len(input))
 	}
@@ -75,7 +78,7 @@ func (lock *Lock) IsLockedFor(key []byte, txnStartTs uint64, resp interface{}) b
 }
 
 // AllLocksForTxn returns all locks for the current transaction.
-func AllLocksForTxn(txn *MvccTxn) ([]KlPair, error) {
+func AllLocksForTxn(txn *MvccTxn) ([]KlPair, error) { //收集当前事务（txn.StartTS）持有的所有锁。
 	var result []KlPair
 	iter := txn.Reader.IterCF(engine_util.CfLock)
 	defer iter.Close()

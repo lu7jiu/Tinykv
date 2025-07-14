@@ -21,6 +21,9 @@ func (wr *Write) ToBytes() []byte {
 	return buf
 }
 
+//序列化格式：
+//[1字节: Kind][8字节: StartTS (大端序)]
+
 func ParseWrite(value []byte) (*Write, error) {
 	if value == nil {
 		return nil, nil

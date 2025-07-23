@@ -210,7 +210,7 @@ func newRaft(c *Config) *Raft {
 	// for _, pr := range c.peers {
 	// 	vote[pr] = false
 	// }
-	return &Raft{
+	raft := &Raft{
 		id:               c.ID,
 		Term:             hardstate.Term,
 		Vote:             hardstate.Vote,
@@ -222,6 +222,10 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
 	}
+	if c.Applied > 0 {
+		raft.RaftLog.applied = c.Applied
+	}
+	return raft
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -238,6 +242,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 	//日志被压缩，发快照
 	if pr.Next < r.RaftLog.FirstIndex() || err != nil {
 		//快照,待实现
+		//r.sendSnapshot(to)
+		//return true
 	}
 	firstindex := r.RaftLog.FirstIndex()
 	var entries []*pb.Entry
@@ -266,6 +272,8 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
+		//增加
+		// Commit: r.RaftLog.committed,
 	}
 	r.msgs = append(r.msgs, msg)
 }
@@ -416,7 +424,14 @@ func (r *Raft) becomeLeader() {
 			r.sendAppend(pr)
 		}
 	}
-	//更新commitindex？
+	//增加，发送心跳
+	// for pr := range r.Prs {
+	// 	if pr != r.id {
+	// 		r.sendHeartbeat(pr)
+	// 	}
+	// }
+	//更新commitindex！如果只有一个节点（领导者），不会发送日志追加rpc，无法更新committed
+	r.updateCommitIndex()
 }
 
 // 在新的任期下重置状态
@@ -541,7 +556,7 @@ func (r *Raft) LeaderStep(m pb.Message) error {
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResponse(m)
 	case pb.MessageType_MsgTransferLeader:
-		//
+		//r.handleTransferLeader(m)
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleElection()
 	}
@@ -563,7 +578,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		}
 		r.electionElapsed = 0
 	}
-	//leader直接拒绝
+	//leader直接忽略
 	if r.State == StateLeader {
 		return
 	}
@@ -628,6 +643,10 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		}
 		//选举超时计时清零
 		r.electionElapsed = 0
+		//增加，更新committed
+		// if m.Commit > r.RaftLog.committed {
+		// 	r.RaftLog.committed = min(m.Commit, r.RaftLog.LastIndex())
+		// }
 	}
 	//心跳响应
 	r.sendHeartbeatResponse(m.From)
@@ -703,7 +722,9 @@ func (r *Raft) updateCommitIndex() uint64 {
 		match[i] = pr.Match
 		i++
 	}
+	//sort.Sort(sort.Reverse(match))
 	sort.Sort(match)
+	//fmt.Printf("Match indexes after sorting: %v", match)
 	//满足大多数节点复制的日志索引
 	mostcopyindex := match[(len(r.Prs)-1)/2]
 	//判断该日志任期是否为当前任期
@@ -720,6 +741,7 @@ func (r *Raft) updateCommitIndex() uint64 {
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
+		return
 	}
 	// 如果节点落后了，追加日志
 	if m.Commit < r.RaftLog.committed {
@@ -799,6 +821,7 @@ func (r *Raft) addNode(id uint64) {
 }
 
 // removeNode remove a node from raft group
+
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
 }

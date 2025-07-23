@@ -36,6 +36,7 @@ type SoftState struct {
 // Ready encapsulates the entries and messages that are ready to read,
 // be saved to stable storage, committed or sent to other peers.
 // All fields in Ready are read-only.
+// 持久化数据、发送消息、状态变更
 type Ready struct {
 	// The current volatile state of a Node.
 	// SoftState will be nil if there is no update.
@@ -73,12 +74,36 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	//判断是否有状态变化
+	preSoftState *SoftState
+	preHardState pb.HardState
+}
+
+func (r *Raft) softState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+}
+
+func (r *Raft) hardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	raft := newRaft(config)
+	rawnode := &RawNode{
+		Raft:         raft,
+		preSoftState: raft.softState(),
+		preHardState: raft.hardState(),
+	}
+	return rawnode, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -146,12 +171,49 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	ready := Ready{
+		Entries:          rn.Raft.RaftLog.unstableEntries(),
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
+		Messages:         rn.Raft.msgs,
+	}
+	//判断有无新状态
+	softstate := rn.Raft.softState()
+	if !isSoftStateEqual(softstate, rn.preSoftState) {
+		ready.SoftState = softstate
+	}
+	hardstate := rn.Raft.hardState()
+	if !isHardStateEqual(hardstate, rn.preHardState) {
+		ready.HardState = hardstate
+	}
+	//判断有无待持久化的快照(待实现)
+	return ready
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	//状态变化
+	softstate := rn.Raft.softState()
+	if !isSoftStateEqual(softstate, rn.preSoftState) {
+		return true
+	}
+	hardstate := rn.Raft.hardState()
+	if !isHardStateEqual(hardstate, rn.preHardState) {
+		return true
+	}
+	//有待持久化的日志
+	if len(rn.Raft.RaftLog.unstableEntries()) > 0 {
+		return true
+	}
+	//有带持久化的快照（待实现）
+	//有待应用的日志
+	if len(rn.Raft.RaftLog.nextEnts()) > 0 {
+		return true
+	}
+	//有待发送的信息
+	if len(rn.Raft.msgs) > 0 {
+		return true
+	}
 	return false
 }
 
@@ -159,6 +221,24 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	//更新preState
+	if !IsEmptySoftState(rd.SoftState) {
+		rn.preSoftState = rd.SoftState
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		rn.preHardState = rd.HardState
+	}
+	//有持久化的日志则更新stabled索引
+	if len(rd.Entries) > 0 {
+		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
+	}
+	//压缩快照（待实现）
+	//有应用的日志则更新applied索引
+	if len(rd.CommittedEntries) > 0 {
+		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	}
+	//清空消息
+	rn.Raft.msgs = make([]pb.Message, 0)
 }
 
 // GetProgress return the Progress of this node and its peers, if this

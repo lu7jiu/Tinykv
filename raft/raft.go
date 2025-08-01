@@ -184,6 +184,8 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+	// 记录在某一轮心跳中，每个 follower 是否给了 heartbeat 回应，用于应对网络分区，判断领导者是否要发起选举
+	heartbeatResp map[uint64]bool
 }
 
 // newRaft return a raft peer with the given config
@@ -221,6 +223,7 @@ func newRaft(c *Config) *Raft {
 		Lead:             None,
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
+		heartbeatResp:    make(map[uint64]bool),
 	}
 	if c.Applied > 0 {
 		raft.RaftLog.applied = c.Applied
@@ -358,6 +361,20 @@ func (r *Raft) tick() {
 		}
 	case StateLeader:
 		r.heartbeatElapsed++
+		heartbeatresponseNum := len(r.heartbeatResp)
+		total := len(r.Prs)
+		//选举超时
+		if r.electionElapsed >= r.electionTimeout {
+			//计时清零
+			r.electionElapsed = 0
+			r.heartbeatResp = make(map[uint64]bool)
+			r.heartbeatResp[r.id] = true
+			// 心跳回应数不超过一半，发生网络分区，重新开始选举
+			if heartbeatresponseNum*2 <= total {
+				r.handleElection()
+				return
+			}
+		}
 		//心跳超时
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
 			r.heartbeatElapsed = 0
@@ -424,12 +441,6 @@ func (r *Raft) becomeLeader() {
 			r.sendAppend(pr)
 		}
 	}
-	//增加，发送心跳
-	// for pr := range r.Prs {
-	// 	if pr != r.id {
-	// 		r.sendHeartbeat(pr)
-	// 	}
-	// }
 	//更新commitindex！如果只有一个节点（领导者），不会发送日志追加rpc，无法更新committed
 	r.updateCommitIndex()
 }
@@ -447,6 +458,8 @@ func (r *Raft) reset(term uint64) {
 	r.heartbeatElapsed = 0
 	//重置选举超时时间
 	r.resetRandomizedElectionTimeout()
+	r.heartbeatResp = make(map[uint64]bool)
+	r.heartbeatResp[r.id] = true
 }
 
 // 随机重置选举超时时间
@@ -747,6 +760,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 	if m.Commit < r.RaftLog.committed {
 		r.sendAppend(m.From)
 	}
+	r.heartbeatResp[m.From] = true
 }
 
 // 处理选举响应

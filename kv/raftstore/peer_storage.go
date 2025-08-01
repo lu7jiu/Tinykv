@@ -36,6 +36,7 @@ type PeerStorage struct {
 	// current raft state of the peer
 	raftState *rspb.RaftLocalState
 	// current apply state of the peer
+	//状态机
 	applyState *rspb.RaftApplyState
 
 	// current snapshot state
@@ -231,6 +232,7 @@ func (ps *PeerStorage) AppliedIndex() uint64 {
 }
 
 func (ps *PeerStorage) validateSnap(snap *eraftpb.Snapshot) bool {
+	//快照不能比已压缩日志更旧
 	idx := snap.GetMetadata().GetIndex()
 	if idx < ps.truncatedIndex() {
 		log.Infof("%s snapshot is stale, generate again, snapIndex: %d, truncatedIndex: %d", ps.Tag, idx, ps.truncatedIndex())
@@ -241,6 +243,7 @@ func (ps *PeerStorage) validateSnap(snap *eraftpb.Snapshot) bool {
 		log.Errorf("%s failed to decode snapshot, it may be corrupted, err: %v", ps.Tag, err)
 		return false
 	}
+	//region配置版本必须足够新
 	snapEpoch := snapData.GetRegion().GetRegionEpoch()
 	latestEpoch := ps.region.GetRegionEpoch()
 	if snapEpoch.GetConfVer() < latestEpoch.GetConfVer() {
@@ -308,6 +311,42 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	if len(entries) == 0 {
+		return nil
+	}
+	var err error = nil
+	//ps中已持久化的日志索引
+	oldfirstindex, err := ps.FirstIndex()
+	if err != nil {
+		return err
+	}
+	oldlastindex, err := ps.LastIndex()
+	if err != nil {
+		return err
+	}
+	//待持久化的日志索引
+	newfirstindex := entries[0].Index
+	newlastindex := entries[len(entries)-1].Index
+	//所有待持久化的日志都已被压缩，无需持久化
+	if newlastindex < oldfirstindex {
+		return nil
+	}
+	//从已持久化的第一条日志之后开始追加
+	if newfirstindex < oldfirstindex {
+		entries = entries[oldfirstindex-newfirstindex:]
+	}
+	for _, entry := range entries {
+		err = raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, entry.Index), &entry)
+		if err != nil {
+			return err
+		}
+	}
+	//删除冲突（没有提交的日志，将要被覆盖）
+	if newlastindex < oldlastindex {
+		for i := newlastindex + 1; i <= oldlastindex; i++ {
+			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
+		}
+	}
 	return nil
 }
 
@@ -331,7 +370,30 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	return nil, nil
+	//更新硬状态
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	var raftWB *engine_util.WriteBatch = new(engine_util.WriteBatch)
+	if len(ready.Entries) != 0 {
+		//持久化日志
+		err := ps.Append(ready.Entries, raftWB)
+		if err != nil {
+			return nil, err
+		}
+		ps_firstindex, _ := ps.FirstIndex()
+		//有新的持久化的日志则更新raftstate
+		if ready.Entries[len(ready.Entries)-1].Index >= ps_firstindex {
+			ps.raftState.LastIndex = ready.Entries[len(ready.Entries)-1].Index
+			ps.raftState.LastTerm = ready.Entries[len(ready.Entries)-1].Term
+		}
+	}
+	//持久化快照(待实现)
+	//持久化状态
+	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	//批量写入
+	err := raftWB.WriteToDB(ps.Engines.Raft)
+	return nil, err
 }
 
 func (ps *PeerStorage) ClearData() {

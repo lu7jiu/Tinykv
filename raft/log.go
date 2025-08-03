@@ -88,6 +88,19 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	notCompactFirstindex, err := l.storage.FirstIndex()
+	if err != nil {
+		return
+	}
+	if len(l.entries) > 0 {
+		//没有被压缩的日志索引大于全部日志，则全部删除
+		if notCompactFirstindex > l.LastIndex() {
+			l.entries = nil
+		} else if notCompactFirstindex > l.FirstIndex() {
+			//没有被压缩的日志的索引大于当前第一条日志，则存在被压缩的日志，需要删除
+			l.entries = l.entries[notCompactFirstindex-l.FirstIndex():]
+		}
+	}
 }
 
 // allEntries return all the entries not compacted.
@@ -95,7 +108,7 @@ func (l *RaftLog) maybeCompact() {
 // note, this is one of the test stub functions you need to implement.
 func (l *RaftLog) allEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return l.entries //不确定
+	return l.entries
 }
 
 // unstableEntries return all the unstable entries

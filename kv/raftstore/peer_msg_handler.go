@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -58,7 +59,19 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	if applySnapResult != nil {
-		//快照（待实现）
+		//region有变化
+		if !reflect.DeepEqual(applySnapResult.PrevRegion, applySnapResult.Region) {
+			//d.SetRegion(applySnapResult.Region)
+			d.ctx.storeMeta.Lock()
+			d.ctx.storeMeta.setRegion(applySnapResult.Region, d.peer)
+			d.ctx.storeMeta.regionRanges.Delete(&regionItem{
+				region: applySnapResult.PrevRegion,
+			})
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{
+				region: applySnapResult.Region,
+			})
+			d.ctx.storeMeta.Unlock()
+		}
 	}
 	//发送message
 	if len(ready.Messages) > 0 {
@@ -166,7 +179,34 @@ func (d *peerMsgHandler) applyEntryNormal(entry *eraftpb.Entry, kvWB *engine_uti
 			d.processProposals(response, entry, true)
 		}
 	}
-
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			compactindex := msg.AdminRequest.CompactLog.CompactIndex
+			compactterm := msg.AdminRequest.CompactLog.CompactTerm
+			//更新applystate并写入数据库
+			if compactindex >= d.peerStorage.truncatedIndex() {
+				d.peerStorage.applyState.TruncatedState.Index = compactindex
+				d.peerStorage.applyState.TruncatedState.Term = compactterm
+				err := kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+				if err != nil {
+					log.Panic(err)
+					return
+				}
+				//压缩日志
+				d.ScheduleCompactLog(compactindex)
+			}
+			//回应
+			response := &raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{},
+				AdminResponse: &raft_cmdpb.AdminResponse{
+					CmdType:    raft_cmdpb.AdminCmdType_CompactLog,
+					CompactLog: &raft_cmdpb.CompactLogResponse{},
+				},
+			}
+			d.processProposals(response, entry, false)
+		}
+	}
 }
 
 // 发送响应
@@ -326,6 +366,27 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 			msg.Requests = msg.Requests[1:]
 		}
 
+	}
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			//创建proposal，应用（apply）时返回结果
+			d.proposals = append(d.proposals, &proposal{
+				index: d.nextProposalIndex(),
+				term:  d.Term(),
+				cb:    cb,
+			})
+			//将request序列化
+			data, err := msg.Marshal()
+			if err != nil {
+				log.Panic(err)
+			}
+			//追加日志
+			err = d.RaftGroup.Propose(data)
+			if err != nil {
+				log.Panic(err)
+			}
+		}
 	}
 }
 

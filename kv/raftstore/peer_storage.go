@@ -279,14 +279,19 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 	beginLogKey := meta.RaftLogKey(regionID, 0)
 	endLogKey := meta.RaftLogKey(regionID, firstIndex)
 	err := engines.Raft.View(func(txn *badger.Txn) error {
+		// 1. 创建 Badger 迭代器
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
+		// 2. 定位到日志的起始 Key（regionID 对应的第一条日志）
 		it.Seek(beginLogKey)
+		// 3. 检查是否存在有效的日志条目
 		if it.Valid() && bytes.Compare(it.Item().Key(), endLogKey) < 0 {
+			// 4. 从 Key 中解析出日志的索引（logIdx）
 			logIdx, err1 := meta.RaftLogIndex(it.Item().Key())
 			if err1 != nil {
 				return err1
 			}
+			// 5. 更新 firstIndex（实际需要删除的最小日志索引）
 			firstIndex = logIdx
 		}
 		return nil
@@ -362,7 +367,56 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+
+	//删除持久化的日志、状态、过时的数据
+	if ps.isInitialized() {
+		// ClearMeta delete stale metadata like raftState, applyState, regionState and raft log entries
+		err := ps.clearMeta(kvWB, raftWB)
+		if err != nil {
+			return nil, err
+		}
+		// Delete all data that is not covered by `new_region`.
+		ps.clearExtraData(snapData.Region)
+	}
+	//更新peer storage state
+	ps.applyState.AppliedIndex = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+	ps.raftState.LastIndex = snapshot.Metadata.Index
+	ps.raftState.LastTerm = snapshot.Metadata.Term
+	ps.snapState.StateType = snap.SnapState_Applying
+	//写入数据库
+	err := kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.Id), ps.applyState)
+	if err != nil {
+		return nil, err
+	}
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
+	err = raftWB.SetMeta(meta.RaftStateKey(snapData.Region.Id), ps.raftState)
+	if err != nil {
+		return nil, err
+	}
+	//通过 ps.regionSched 发送 RegionTaskApply 任务给 region worker 处理
+	//发送指针，若发送值类型，接收方完成任务后，向 Notifier 发送信号时，发送方无法感知
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: snapData.Region.Id,
+		Notifier: make(chan<- bool, 1),
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.StartKey,
+		EndKey:   snapData.Region.EndKey,
+	}
+	// ps.regionSched <- runner.RegionTaskApply{
+	// 	RegionId: snapData.Region.Id,
+	// 	Notifier: make(chan<- bool, 1),
+	// 	SnapMeta: snapshot.Metadata,
+	// 	StartKey: snapData.Region.StartKey,
+	// 	EndKey:   snapData.Region.EndKey,
+	// }
+
+	applysnapresult := &ApplySnapResult{
+		PrevRegion: ps.region,
+		Region:     snapData.Region,
+	}
+	return applysnapresult, nil
 }
 
 // Save memory states to disk.
@@ -388,12 +442,22 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 			ps.raftState.LastTerm = ready.Entries[len(ready.Entries)-1].Term
 		}
 	}
-	//持久化快照(待实现)
+	//应用快照
+	var kvWB *engine_util.WriteBatch = new(engine_util.WriteBatch)
+	var applySnapResult *ApplySnapResult
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		var err error
+		applySnapResult, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		if err != nil {
+			return nil, err
+		}
+	}
 	//持久化状态
 	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
 	//批量写入
 	err := raftWB.WriteToDB(ps.Engines.Raft)
-	return nil, err
+	err = kvWB.WriteToDB(ps.Engines.Kv)
+	return applySnapResult, err
 }
 
 func (ps *PeerStorage) ClearData() {

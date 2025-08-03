@@ -244,9 +244,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 	prelogterm, err := r.RaftLog.Term(prelogindex)
 	//日志被压缩，发快照
 	if pr.Next < r.RaftLog.FirstIndex() || err != nil {
-		//快照,待实现
-		//r.sendSnapshot(to)
-		//return true
+		r.sendSnapshot(to)
+		return true
 	}
 	firstindex := r.RaftLog.FirstIndex()
 	var entries []*pb.Entry
@@ -262,6 +261,22 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Index:   prelogindex,
 		Entries: entries,
 		Commit:  r.RaftLog.committed,
+	}
+	r.msgs = append(r.msgs, msg)
+	return true
+}
+
+func (r *Raft) sendSnapshot(to uint64) bool {
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		return false
+	}
+	msg := pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		To:       to,
+		From:     r.id,
+		Term:     r.Term,
+		Snapshot: &snapshot,
 	}
 	r.msgs = append(r.msgs, msg)
 	return true
@@ -827,6 +842,52 @@ func (r *Raft) appendEntry(entries []*pb.Entry) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	//任期小直接拒绝
+	if m.Term < r.Term {
+		r.sendAppendResponse(true, m.From, r.RaftLog.LastIndex())
+		return
+	}
+	//任期新则更新任期、领导
+	if m.Term >= r.Term {
+		r.Term = m.Term
+		if r.Lead != m.From {
+			r.Lead = m.From
+		}
+		if r.State != StateFollower {
+			r.becomeFollower(m.Term, m.From)
+		}
+		r.electionElapsed = 0
+	}
+	//快照元数据
+	metadata := m.Snapshot.Metadata
+	confstate := metadata.ConfState
+	index := metadata.Index
+	term := metadata.Term
+	if index <= r.RaftLog.committed {
+		return
+	}
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	//快照和日志分开处理，pendingSnapshot快照会被持久化，更新日志的各类索引以便于之后日志持久化、应用正常进行
+	r.RaftLog.stabled = index
+	r.RaftLog.committed = index
+	r.RaftLog.applied = index
+	//有集群成员变更
+	if confstate != nil {
+		r.Prs = make(map[uint64]*Progress)
+		for _, id := range confstate.Nodes {
+			r.Prs[id] = &Progress{}
+		}
+	}
+	//如果快照之后没有日志则添加空日志，标记最新的日志索引和任期
+	if r.RaftLog.LastIndex() <= index {
+		entry := pb.Entry{
+			EntryType: pb.EntryType_EntryNormal,
+			Term:      term,
+			Index:     index,
+		}
+		r.RaftLog.entries = append(r.RaftLog.entries, entry)
+	}
+	r.sendAppendResponse(false, m.From, r.RaftLog.LastIndex())
 }
 
 // addNode add a new node to raft group

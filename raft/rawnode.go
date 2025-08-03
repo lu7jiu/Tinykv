@@ -185,7 +185,10 @@ func (rn *RawNode) Ready() Ready {
 	if !isHardStateEqual(hardstate, rn.preHardState) {
 		ready.HardState = hardstate
 	}
-	//判断有无待持久化的快照(待实现)
+	//判断有无待持久化的快照
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		ready.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+	}
 	return ready
 }
 
@@ -205,7 +208,10 @@ func (rn *RawNode) HasReady() bool {
 	if len(rn.Raft.RaftLog.unstableEntries()) > 0 {
 		return true
 	}
-	//有带持久化的快照（待实现）
+	//有带持久化的快照
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		return true
+	}
 	//有待应用的日志
 	if len(rn.Raft.RaftLog.nextEnts()) > 0 {
 		return true
@@ -232,13 +238,16 @@ func (rn *RawNode) Advance(rd Ready) {
 	if len(rd.Entries) > 0 {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
 	}
-	//压缩快照（待实现）
 	//有应用的日志则更新applied索引
 	if len(rd.CommittedEntries) > 0 {
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
 	}
 	//清空消息
 	rn.Raft.msgs = make([]pb.Message, 0)
+	//清空pendingSnapshot
+	rn.Raft.RaftLog.pendingSnapshot = nil
+	//清空压缩的日志
+	rn.Raft.RaftLog.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this

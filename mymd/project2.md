@@ -103,3 +103,42 @@ raft同步日志后，有ready需要处理
 ### 问题及解决
 1.网络分区：增加heartbeatResp记录leader收到的心跳响应，在leader选举超时时，若收到心跳响应少于半数，则表示发生网络分区，此时leader应发起选举，不能再做leader
 2.一个`Request`对应一个`RaftCmdResponse`及`proposal`，而不是一个`RaftCmdRequest`对应一个`RaftCmdResponse`及`proposal`
+
+## 2C
+根据配置 RaftLogGcCountLimit 不时检查是否需要进行 gc log。如果是，它将提出一个 raft 管理命令 CompactLogRequest，它包装在 RaftCmdRequest 中，就像 project2 部分 B 中实现的四种基本命令类型（Get/Put/Delete/Snap）一样。然后，当 Raft 提交此 admin 命令时，您需要处理它。
+CompactLogRequest 修改元数据，即更新 RaftApplyState 中的 RaftTruncatedState。之后，您应该通过 ScheduleCompactLog 将任务安排到 raftlog-gc worker。Raftlog-gc worker 将异步执行实际的日志删除工作。
+```go
+func (d *peerMsgHandler) onRaftGCLogTick() {
+	d.ticker.schedule(PeerTickRaftLogGC)
+	if !d.IsLeader() {
+		return
+	}
+
+	appliedIdx := d.peerStorage.AppliedIndex()
+	firstIdx, _ := d.peerStorage.FirstIndex()
+	var compactIdx uint64
+	if appliedIdx > firstIdx && appliedIdx-firstIdx >= d.ctx.cfg.RaftLogGcCountLimit {
+		compactIdx = appliedIdx
+	} else {
+		return
+	}
+
+	y.Assert(compactIdx > 0)
+	compactIdx -= 1
+	if compactIdx < firstIdx {
+		// In case compact_idx == first_idx before subtraction.
+		return
+	}
+
+	term, err := d.RaftGroup.Raft.RaftLog.Term(compactIdx)
+	if err != nil {
+		log.Fatalf("appliedIdx: %d, firstIdx: %d, compactIdx: %d", appliedIdx, firstIdx, compactIdx)
+		panic(err)
+	}
+
+	// Create a compact log request and notify directly.
+	regionID := d.regionId
+	request := newCompactLogRequest(regionID, d.Meta, compactIdx, term)
+	d.proposeRaftCommand(request, nil)
+}
+```

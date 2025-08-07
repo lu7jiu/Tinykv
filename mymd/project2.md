@@ -105,8 +105,9 @@ raft同步日志后，有ready需要处理
 2.一个`Request`对应一个`RaftCmdResponse`及`proposal`，而不是一个`RaftCmdRequest`对应一个`RaftCmdResponse`及`proposal`
 
 ## 2C
-根据配置 RaftLogGcCountLimit 不时检查是否需要进行 gc log。如果是，它将提出一个 raft 管理命令 CompactLogRequest，它包装在 RaftCmdRequest 中，就像 project2 部分 B 中实现的四种基本命令类型（Get/Put/Delete/Snap）一样。然后，当 Raft 提交此 admin 命令时，您需要处理它。
-CompactLogRequest 修改元数据，即更新 RaftApplyState 中的 RaftTruncatedState。之后，您应该通过 ScheduleCompactLog 将任务安排到 raftlog-gc worker。Raftlog-gc worker 将异步执行实际的日志删除工作。
+### 日志压缩
+服务器会定期检查 Raft 日志的数量，并时不时丢弃超过阈值的日志条目。
+根据`RaftLogGcCountLimit`定期检查是否需要进行 gc log。如果是，它将提出一个压缩日志请求（CompactLogRequest），包装在`RaftCmdRequest`的`AdminRequest`中。
 ```go
 func (d *peerMsgHandler) onRaftGCLogTick() {
 	d.ticker.schedule(PeerTickRaftLogGC)
@@ -140,5 +141,111 @@ func (d *peerMsgHandler) onRaftGCLogTick() {
 	regionID := d.regionId
 	request := newCompactLogRequest(regionID, d.Meta, compactIdx, term)
 	d.proposeRaftCommand(request, nil)
+}
+```
+我们需要完成处理日志压缩请求、应用日志压缩请求这两部分内容，即完善peer_msg_handler.go文件。
+1.处理日志压缩请求：同2B部分。
+
+- 添加一个proposal用于在应用后返回响应
+- 将请求信息包装在日志中，调用`Propose`追加日志，在raft中同步日志。
+
+2.应用日志：
+
+- 更新`applystate.TruncatedState`并写入数据库
+- 调用`d.ScheduleCompactLog(compactindex)`，通过`ScheduleCompactLog`向`raftlog-gc`工作线程调度一个任务。`Raftlog-gc`工作线程会异步执行实际的日志删除工作。
+
+### 快照
+1.发送快照：leader向follower发送日志追加请求时，若follower落后太多，由于日志压缩，待追加的日志可能已经被压缩，此时需要发送快照。
+
+- 调用`RaftLog.storage.Snapshot()`获取快照，将快照包装在`MsgSnapshot`类型的信息中发送给follower。
+  
+2.处理快照：follower调用`handleSnapshot`来处理该消息，即从消息中的`SnapshotMetadata`恢复Raft的内部状态，如任期、提交索引和成员信息等。
+
+- 消息发送者任期小直接拒绝
+- 更新任期、角色、领导，重置选举超时计时
+- 若快照中包含的最后一条日志索引小于等于当前已提交的日志，则说明快照消息已过时，直接返回即可
+- 将消息中的快照存放在`RaftLog.pendingSnapshot`中
+- 更新`stabled、committed、applied`为快照的最后一条日志的索引
+- 若有集群成员变更，则更新`Prs`
+- 若快照之后没有日志，则添加一条空日志，用于标记最新日志的索引和任期，便于后续追加日志
+  
+3.应用快照：若raft节点的`pendingSnapshot`非空，表示有待处理的快照，通过`Ready`来反馈，在处理`Ready`时应用快照。
+
+- 调用`clearMeta`、`clearExtraData`删除数据库中的日志、状态、过时的数据
+- 更新`applyState`、`raftState`、`snapState`，并写入数据库
+- 通过`ps.regionSched`发送`RegionTaskApply`任务给`region worker`处理
+- 返回`ApplySnapResult`，存放应用快照前后的Region信息
+- 若Region有变化，则更新`peerMsgHandler.ctx.storeMeta`的内容
+- 处理完Ready后调用`Advance`更新节点时，需清空`pendingSnapshot`，调用`maybeCompact`清空RaftLog中被压缩的日志
+
+### 问题及解决
+1.发送`RegionTaskApply`任务时应该发送指针类型的数据给`ps.regionSched`，若发送值类型，接收方完成任务后，向`Notifier`发送信号时，发送方无法感知。
+```go
+type PeerStorage struct {
+	// current region information of the peer
+	region *metapb.Region
+	// current raft state of the peer
+	raftState *rspb.RaftLocalState
+	// current apply state of the peer
+	//状态机
+	applyState *rspb.RaftApplyState
+
+	// current snapshot state
+	snapState snap.SnapState
+	// regionSched used to schedule task to region worker
+	regionSched chan<- worker.Task
+	// generate snapshot tried count
+	snapTriedCnt int
+	// Engine include two badger instance: Raft and Kv
+	Engines *engine_util.Engines
+	// Tag used for logging
+	Tag string
+}
+
+type Task interface{}
+```
+Task是空接口，发送哪种类型的数据都不会报错。参考`Snapshot`中使用`ps.regionSched`部分：
+```go
+func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
+	var snapshot eraftpb.Snapshot
+	if ps.snapState.StateType == snap.SnapState_Generating {
+		select {
+		case s := <-ps.snapState.Receiver:
+			if s != nil {
+				snapshot = *s
+			}
+		default:
+			return snapshot, raft.ErrSnapshotTemporarilyUnavailable
+		}
+		ps.snapState.StateType = snap.SnapState_Relax
+		if snapshot.GetMetadata() != nil {
+			ps.snapTriedCnt = 0
+			if ps.validateSnap(&snapshot) {
+				return snapshot, nil
+			}
+		} else {
+			log.Warnf("%s failed to try generating snapshot, times: %d", ps.Tag, ps.snapTriedCnt)
+		}
+	}
+
+	if ps.snapTriedCnt >= 5 {
+		err := errors.Errorf("failed to get snapshot after %d times", ps.snapTriedCnt)
+		ps.snapTriedCnt = 0
+		return snapshot, err
+	}
+
+	log.Infof("%s requesting snapshot", ps.Tag)
+	ps.snapTriedCnt++
+	ch := make(chan *eraftpb.Snapshot, 1)
+	ps.snapState = snap.SnapState{
+		StateType: snap.SnapState_Generating,
+		Receiver:  ch,
+	}
+	// schedule snapshot generate task
+	ps.regionSched <- &runner.RegionTaskGen{
+		RegionId: ps.region.GetId(),
+		Notifier: ch,
+	}
+	return snapshot, raft.ErrSnapshotTemporarilyUnavailable
 }
 ```

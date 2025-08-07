@@ -224,6 +224,7 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
 		heartbeatResp:    make(map[uint64]bool),
+		leadTransferee:   0,
 	}
 	if c.Applied > 0 {
 		raft.RaftLog.applied = c.Applied
@@ -347,6 +348,24 @@ func (r *Raft) sendRequestVoteResponse(reject bool, to uint64) {
 	r.msgs = append(r.msgs, msg)
 }
 
+func (r *Raft) sendTimeoutNow(to uint64) {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgTimeoutNow,
+		To:      to,
+		From:    r.id,
+	}
+	r.msgs = append(r.msgs, msg)
+}
+
+func (r *Raft) sendTransferLeader(from, to uint64) {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgTransferLeader,
+		From:    from,
+		To:      to,
+	}
+	r.msgs = append(r.msgs, msg)
+}
+
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
@@ -388,6 +407,10 @@ func (r *Raft) tick() {
 			if heartbeatresponseNum*2 <= total {
 				r.handleElection()
 				return
+			}
+			//转移失败则停止转移
+			if r.leadTransferee != 0 {
+				r.leadTransferee = 0
 			}
 		}
 		//心跳超时
@@ -475,6 +498,7 @@ func (r *Raft) reset(term uint64) {
 	r.resetRandomizedElectionTimeout()
 	r.heartbeatResp = make(map[uint64]bool)
 	r.heartbeatResp[r.id] = true
+	r.leadTransferee = 0
 }
 
 // 随机重置选举超时时间
@@ -523,7 +547,7 @@ func (r *Raft) FollowerStep(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 	case pb.MessageType_MsgTransferLeader:
-		//
+		r.sendTransferLeader(m.From, r.Lead)
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleElection()
 	}
@@ -551,7 +575,7 @@ func (r *Raft) CandidateStep(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 	case pb.MessageType_MsgTransferLeader:
-		//
+		r.sendTransferLeader(m.From, r.Lead)
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleElection()
 	}
@@ -569,7 +593,12 @@ func (r *Raft) LeaderStep(m pb.Message) error {
 			}
 		}
 	case pb.MessageType_MsgPropose:
-		r.handlePropose(m)
+		//正在转移领导权，停止接受新的提议，以避免陷入循环
+		if r.leadTransferee != 0 {
+			err = ErrProposalDropped
+		} else {
+			r.handlePropose(m)
+		}
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
@@ -584,7 +613,7 @@ func (r *Raft) LeaderStep(m pb.Message) error {
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResponse(m)
 	case pb.MessageType_MsgTransferLeader:
-		//r.handleTransferLeader(m)
+		r.handleTransferLeader(m)
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleElection()
 	}
@@ -738,7 +767,14 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 			}
 		}
 	}
-
+	//若正在进行领导权转移而追加日志，则在追加完日志后重新尝试
+	if m.From == r.leadTransferee {
+		r.Step(pb.Message{
+			MsgType: pb.MessageType_MsgTransferLeader,
+			To:      r.id,
+			From:    r.leadTransferee,
+		})
+	}
 }
 
 // 更新提交日志索引
@@ -890,13 +926,54 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.sendAppendResponse(false, m.From, r.RaftLog.LastIndex())
 }
 
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	//判断转移目标是否在集群中
+	if _, ok := r.Prs[m.From]; !ok {
+		return
+	}
+	r.leadTransferee = m.From
+	//判断日志是否足够新
+	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		//接收者合格，领导者应该立即向接收者发送 MsgTimeoutNow 消息
+		r.sendTimeoutNow(m.From)
+	} else {
+		//落后则追加日志
+		r.sendAppend(m.From)
+	}
+}
+
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	//如果存在则返回
+	if _, ok := r.Prs[id]; ok {
+		return
+	}
+	r.Prs[id] = &Progress{
+		Match: 0,
+		Next:  r.RaftLog.LastIndex() + 1,
+	}
 }
 
 // removeNode remove a node from raft group
 
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	//如果不存在则返回
+	if _, ok := r.Prs[id]; !ok {
+		return
+	}
+	delete(r.Prs, id)
+	//删除结点之后可能收不到追加日志响应，无法更新commit索引，因此需要额外更新
+	if r.State == StateLeader {
+		oldcimmitted := r.RaftLog.committed
+		r.updateCommitIndex()
+		if oldcimmitted != r.RaftLog.committed {
+			for pr := range r.Prs {
+				if pr != r.id {
+					r.sendAppend(pr)
+				}
+			}
+		}
+	}
 }

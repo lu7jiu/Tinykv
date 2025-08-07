@@ -88,6 +88,7 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	//没有被压缩的日志，即需要留下的日志
 	notCompactFirstindex, err := l.storage.FirstIndex()
 	if err != nil {
 		return
